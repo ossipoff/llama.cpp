@@ -23,7 +23,10 @@ int llama_quantize(int argc, char ** argv);
 int llama_perplexity(int argc, char ** argv);
 int llama_download(int argc, char ** argv);
 
-// Self-update is only supported for binaries built with llama-install.sh
+// Self-update is only supported for binaries built with llama-install.sh.
+// A source build instead reports how the installed binary compares to the
+// source tree and to upstream, and prints the commands to catch up. It never
+// auto-rebuilds: this is a manual, experimental setup.
 static int llama_update(int argc, char ** argv) {
     (void) argc;
     (void) argv;
@@ -35,8 +38,76 @@ static int llama_update(int argc, char ** argv) {
     return system("curl -fsSL https://llama.app/install.sh | sh");
 #endif
 #else
-    printf("Updates are available only when installed from https://llama.app\n");
-    return 1;
+    const char * src_dir = std::getenv("LLAMA_SRC_DIR");
+    if (!src_dir || !*src_dir) {
+        printf("LLAMA_SRC_DIR is not set; point it at your llama.cpp source dir\n");
+        return 1;
+    }
+
+    const std::string embedded = llama_commit();
+    const std::string cmd_cd   = "cd '" + std::string(src_dir) + "'";
+
+    std::string fetch = cmd_cd + " && git fetch origin master 2>&1";
+    if (system(fetch.c_str()) != 0) {
+        printf("warning: git fetch failed (offline or not a git checkout);\n");
+        printf("         comparing against the last known remote state\n\n");
+    }
+
+    auto rev = [&](const char * ref) -> std::string {
+        std::string cmd = cmd_cd + " && git rev-parse --short "+std::string(ref);
+        std::string out;
+        FILE * fp = popen(cmd.c_str(), "r");
+        if (!fp) {
+            return {};
+        }
+        char buf[64];
+        while (fgets(buf, sizeof buf, fp)) {
+            out += buf;
+        }
+        pclose(fp);
+        while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) {
+            out.pop_back();
+        }
+        return out;
+    };
+
+    const std::string head     = rev("HEAD");
+    const std::string upstream = rev("origin/master");
+
+    printf("installed build : %s (build %d)\n", embedded.c_str(), llama_build_number());
+    if (head.empty()) {
+        printf("local source    : unknown (git not available?)\n");
+        printf("\nthis binary is a source build, not a llama.app install.\n");
+        printf("To update: pull the source and rebuild (see BUILD-ROCM.md).\n");
+        return 2;
+    }
+    printf("local source    : %s\n", head.c_str());
+    if (!upstream.empty()) {
+        printf("upstream master : %s\n", upstream.c_str());
+    } else {
+        printf("upstream master : unknown (fetch failed?)\n");
+    }
+    printf("\n");
+
+    bool outdated = false;
+    if (embedded != head) {
+        outdated = true;
+        printf("-> the installed build is older than your local source.\n");
+        printf("   rebuild it:\n");
+        printf("     cmake --build build --config Release -j$(nproc)\n");
+        printf("     cmake --install build --prefix \"$HOME/.local\"\n");
+    }
+    if (!upstream.empty() && head != upstream) {
+        outdated = true;
+        printf("-> upstream is ahead of your local source. To update:\n");
+        printf("     git -C '%s' fetch origin && git -C '%s' pull\n", src_dir, src_dir);
+        printf("     cmake --build build --config Release -j$(nproc)\n");
+        printf("     cmake --install build --prefix \"$HOME/.local\"\n");
+    }
+    if (!outdated) {
+        printf("up to date.\n");
+    }
+    return outdated ? 2 : 0;
 #endif
 }
 
